@@ -1,0 +1,10 @@
+/evidence/logs/incoming/traffic_only.log
+{
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 syslog syslog
+}

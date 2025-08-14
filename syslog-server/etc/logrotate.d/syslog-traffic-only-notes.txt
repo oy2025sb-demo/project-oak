@@ -1,0 +1,35 @@
+
+Note: This text file is here just to provide explanations to the actual "syslog-traffic-only" config file in the same folder, as it does not work with the comments. 
+Use the actual config file to set up log rotation of the "evidence" log file on the syslog server, or it would not work otherwise. 
+
+ - Olesia Y.
+
+
+
+# This logrotate configuration handles the rotation of the single, static
+# log file for "TRAFFIC" logs. The settings are designed for a low-resource
+# demo environment while still following best practices.
+/evidence/logs/incoming/traffic_only.log {
+    # Rotate the log file once a day. This ensures the file doesn't grow
+    # too large and is manageable for analysis, which is important for a demo
+    # with limited disk space.
+    daily
+    # Keep the last 7 rotated log files, providing a full week's worth of
+    # archives for review.
+    rotate 7
+    # Compress the rotated log files to save disk space.
+    compress
+    # Delay the compression of the most recent rotated log file until the
+    # next cycle. This keeps the most recent backup in a readable format
+    # for easy access without decompressing it.
+    delaycompress
+    # Don't throw an error if the file is missing, which makes the script
+    # more robust.
+    missingok
+    # Don't perform rotation if the log file is empty.
+    notifempty
+    # After rotating, create a new empty log file with the correct
+    # permissions (read/write for root, read for others) to ensure rsyslog
+    # can continue writing to it without interruption.
+    create 0644 root root
+}
