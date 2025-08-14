@@ -1,0 +1,21 @@
+# Ensure consistent line endings for Python files
+*.py text eol=lf
+
+# Ensure consistent line endings for Bash scripts
+*.sh text eol=lf
+
+# Configuration files for Ubuntu (e.g., .conf)
+*.conf text eol=lf
+
+# General text files (e.g., README, .txt)
+*.txt text eol=lf
+
+# Force CRLF for Windows batch or PowerShell scripts (if you use them)
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files (no line ending conversions)
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
