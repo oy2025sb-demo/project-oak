@@ -1,0 +1,194 @@
+// KQL Parser for Palo Alto Networks PAN-OS v10.2 Traffic Logs
+//
+// Description:
+// This parser function processes TRAFFIC logs from Palo Alto Networks
+// firewalls (PAN-OS v10.2) ingested into 'Syslog' table Microsoft Sentinel.
+//
+// Documentation reference: 
+// https://docs.paloaltonetworks.com/pan-os/10-2/pan-os-admin/monitoring/use-syslog-for-monitoring/syslog-field-descriptions/traffic-log-fields 
+//
+// The whole log line comes from the source in SyslogMessage field, initially.
+//
+// The parser:
+// - Parses syslog header information if it is present in front of the first field of the CSV data.
+// - Extracts all 115 'TRAFFIC' log fields.
+//
+//
+// Written by:  Olesia Y.
+//
+//
+let PanosTrafficParser = view () {
+    Syslog
+    // Pre-filter for performance: only process messages that look like PAN-OS Traffic logs. 
+    // For the homework assignment, this was already done in the rsyslog config, 
+    // but it's good to use it here again, in case due to environment configuration change other log types get added to the Syslog table. 
+    // (Also it is needed to filter out any older sample non-TRAFFIC type logs that may have "crept in" here before I troubleshooted the setup appropriately.)
+    | where SyslogMessage contains_cs ",TRAFFIC,"
+    | extend CsvFields = parse_csv(SyslogMessage) //Splits a given string representing a single record of comma-separated values and returns a string array with these values.
+    | extend FieldCount = array_length(CsvFields)
+    // Safeguard: Take the last 115 fields as the payload. (As per documentation for PAN-OS 10.2 Syslog Field Descriptions for Traffic Log.) This handles cases where prepended data might contain commas. 
+    // There really shouldn't be any commas before the payload according to the sample provided - but let's make sure.
+    // If FieldCount is larger than 115,  PayloadFields = array_slice(CsvFields, FieldCount - 115, FieldCount - 1). 
+    // Else PayloadFields = CsvFields.
+    // array_slice(array, start, end) extracts a slice of a dynamic array. Returns a dynamic array of the values in the range [start..end] from array.
+    | extend PayloadFields = iif(FieldCount > 115, array_slice(CsvFields, FieldCount - 115, FieldCount - 1), CsvFields)
+    // The first value may contain prepended syslog header information before the first actual field of the TRAFFIC log. 
+    | extend HeaderAndFirstField = tostring(PayloadFields[0])
+    // These 'extract' functions will return null if the pattern is not found, gracefully handling various header formats.
+    | extend
+        //SyslogHeader_ISO8601_Timestamp = tostring(extract(@"^([\dT\:\.\+-Z]+)\s<", 1, HeaderAndFirstField)),
+        SyslogHeader_ISO8601_Timestamp = todatetime(extract(@"^([\dT\:\.\+-Z]+)\s<", 1, HeaderAndFirstField)),
+        //SyslogHeaderPriority = tostring(extract("<(\\d+)>", 1, HeaderAndFirstField)),
+        SyslogHeaderPriority = toint(extract("<(\\d+)>", 1, HeaderAndFirstField)),
+        SyslogHeader_BSD_Timestamp = tostring(extract("<\\d+>([A-Za-z]{3}\\s+\\d{1,2}\\s[\\d:]{8})\\s", 1, HeaderAndFirstField)),
+        SyslogHostname = tostring(extract("[A-Za-z]{3}\\s+\\d{1,2}\\s[\\d:]{8}\\s([\\w\\.-]+?)\\s", 1, HeaderAndFirstField)),
+        SyslogMessageFormatVersion_or_ActualFutureUse1 = tostring(extract("(\\S+)$", 1, HeaderAndFirstField))
+    //
+    // So far, we have been parsing: 
+    // (Possibly optional) syslog header. See sample: 
+    // 2025-08-06T00:00:00.134248+02:00 <14>Aug  6 00:00:00 vnp007 
+    // 
+    // 
+    // ISO 8601 Timestamp:    2025-08-06T00:00:00.134248+02:00  // (With the offset)
+    // <PRI> (Priority):      <14>                              // Syslog priority value
+    // BSD-style timestamp:   Aug  6 00:00:00                   // The local time in the Mmm dd hh:mm:ss format
+    // Hostname:              vnp007                            // Identifies the origin of the message
+    // 
+    // The fields of the header (if present) are separated from each other and the following message (CSV payload) by spaces. 
+    // 
+    // ISO_8601_TIMESTAMP <PRI> BSD_TIMESTAMP HOSTNAME MSG
+    // 
+    // 
+    // The assignment didn't clearly state whether the "Sample Log Data" is presented as seen in the file from which it is read, including the header, or if the source file only contained the CSV (Comma Separated Values).  
+    // We needed to make sure that in case the headers ARE included in the source file, they are also parsed correctly. Hence, the "magic" happening above. :)  
+    //
+    // Now, map all 115 fields from the payload array to named columns.
+    // CSV payload starts below. See sample: 
+    // 1,2025/08/05 23:59:59,025401000648,TRAFFIC,deny,2562,2025/08/05 23:59:59,10.5.37.141,10.39.41.134,0.0.0.0,0.0.0.0,intrazone-default,,,ssl,vsys1,internal,internal,ae1.1801,ae1.1801,default,2025/08/05 23:59:59,1210333,1,51436,5514,0,0,0x100000,tcp,reset-both,587,521,66,4,2025/08/05 23:59:59,0,any,,7509093300282048706,0x8000000000000000,10.0.0.0-10.255.255.255,10.0.0.0-10.255.255.255,,3,1,policy-deny,112,0,0,0,sdn006-fw003,sto02-vnp006,from-application,,,0,,0,,N/A,0,0,0,0,25aea709-433a-48b6-8817-e80b8d8ac0e8,0,0,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,2025-08-06T00:00:00.133+02:00,,,encrypted-tunnel,networking,browser-based,4,"used-by-malware,able-to-transfer-file,has-known-vulnerability,tunnel-other-application,pervasive-use",,ssl,no,no,0
+    //
+    | extend
+        FutureUse1 = SyslogMessageFormatVersion_or_ActualFutureUse1, //??? Larger sample size or spec would have been useful to verify. Theoretically, can be just projected away. PAN-OS documentation says that "The FUTURE_USE tag applies to fields that are of no use to syslog ingestion." Sample contains: 1 . So, looks like this field actually indicates the version of the syslog protocol? (e.g., 1 for RFC 3164, 1 or 2 for RFC 5424)
+        //CsvPayloadReceiveTime = tostring(PayloadFields[1]), //??? Sample contains: 2025/08/05 23:59:59
+        CsvPayloadReceiveTime = todatetime(replace_string(tostring(PayloadFields[1]), '/', '-')), // Sample contains: 2025/08/05 23:59:59
+        SerialNumber = tostring(PayloadFields[2]), // Sample: 25401000648
+        LogType = tostring(PayloadFields[3]), // TRAFFIC
+        Subtype = tostring(PayloadFields[4]),
+        FutureUse2 = tostring(PayloadFields[5]), //??? Larger sample size or spec would have been useful to verify. Theoretically, can be just projected away. PAN-OS documentation says that "The FUTURE_USE tag applies to fields that are of no use to syslog ingestion." Sample contains: 2562
+        //CsvPayloadTimeGenerated = tostring(PayloadFields[6]), //??? Sample contains: 2025/08/05 23:59:59
+        CsvPayloadTimeGenerated = todatetime(replace_string(tostring(PayloadFields[6]), '/', '-')), // Sample contains: 2025/08/05 23:59:59
+        SourceIP = tostring(PayloadFields[7]),
+        DestinationIP = tostring(PayloadFields[8]),
+        NATSourceIP = tostring(PayloadFields[9]),
+        NATDestinationIP = tostring(PayloadFields[10]),
+        RuleName = tostring(PayloadFields[11]),
+        SourceUser = tostring(PayloadFields[12]),
+        DestinationUser = tostring(PayloadFields[13]),
+        Application = tostring(PayloadFields[14]),
+        VirtualSystem = tostring(PayloadFields[15]),
+        SourceZone = tostring(PayloadFields[16]),
+        DestinationZone = tostring(PayloadFields[17]),
+        InboundInterface = tostring(PayloadFields[18]),
+        OutboundInterface = tostring(PayloadFields[19]),
+        LogAction = tostring(PayloadFields[20]),
+        //FutureUse3 = tostring(PayloadFields[21]), //??? Larger sample size or spec would have been useful to verify. Theoretically, can be just projected away. PAN-OS documentation says that "The FUTURE_USE tag applies to fields that are of no use to syslog ingestion." Sample contains: 2025/08/05 23:59:59
+        FutureUse3 = todatetime(replace_string(tostring(PayloadFields[21]), '/', '-')), //??? Larger sample size or spec would have been useful to verify. Theoretically, can be just projected away. PAN-OS documentation says that "The FUTURE_USE tag applies to fields that are of no use to syslog ingestion." Sample contains: 2025/08/05 23:59:59
+        SessionID = tolong(PayloadFields[22]),
+        RepeatCount = toint(PayloadFields[23]),
+        SourcePort = toint(PayloadFields[24]),
+        DestinationPort = toint(PayloadFields[25]),
+        NATSourcePort = toint(PayloadFields[26]),
+        NATDestinationPort = toint(PayloadFields[27]),
+        Flags = tostring(PayloadFields[28]),
+        Protocol = tostring(PayloadFields[29]),
+        Action = tostring(PayloadFields[30]),
+        Bytes = tolong(PayloadFields[31]),
+        BytesSent = tolong(PayloadFields[32]),
+        BytesReceived = tolong(PayloadFields[33]),
+        Packets = tolong(PayloadFields[34]),
+        //StartTime = tostring(PayloadFields[35]), //??? Sample/Example: 2025/08/05 23:59:59
+        StartTime = todatetime(replace_string(tostring(PayloadFields[35]), '/', '-')), // Sample/Example: 2025/08/05 23:59:59
+        TimeElapsed = tolong(PayloadFields[36]), //??? tolong() is probably correct, larger sample size or spec would have been useful to verify
+        Category = tostring(PayloadFields[37]),
+        FutureUse4 = tostring(PayloadFields[38]), // Theoretically, can be just projected away. PAN-OS documentation says that "The FUTURE_USE tag applies to fields that are of no use to syslog ingestion."
+        SequenceNumber = tolong(PayloadFields[39]),
+        ActionFlags = tostring(PayloadFields[40]),
+        SourceLocation = tostring(PayloadFields[41]),
+        DestinationLocation = tostring(PayloadFields[42]),
+        FutureUse5 = tostring(PayloadFields[43]),  // Theoretically, can be just projected away. PAN-OS documentation says that "The FUTURE_USE tag applies to fields that are of no use to syslog ingestion."
+        PacketsSent = tolong(PayloadFields[44]),
+        PacketsReceived = tolong(PayloadFields[45]),
+        SessionEndReason = tostring(PayloadFields[46]),
+        DeviceGroupHierarchyLevel1 = toint(PayloadFields[47]), //??? toint() is probably correct, larger sample size or spec would have been useful to verify
+        DeviceGroupHierarchyLevel2 = toint(PayloadFields[48]), //??? toint() is probably correct, larger sample size or spec would have been useful to verify
+        DeviceGroupHierarchyLevel3 = toint(PayloadFields[49]), //??? toint() is probably correct, larger sample size or spec would have been useful to verify
+        DeviceGroupHierarchyLevel4 = toint(PayloadFields[50]), //??? toint() is probably correct, larger sample size or spec would have been useful to verify
+        VirtualSystemName = tostring(PayloadFields[51]),
+        DeviceName = tostring(PayloadFields[52]),
+        ActionSource = tostring(PayloadFields[53]),
+        SourceVMUUID = tostring(PayloadFields[54]),
+        DestinationVMUUID = tostring(PayloadFields[55]),
+        TunnelID_IMSI = tostring(PayloadFields[56]),
+        MonitorTag_IMEI = tostring(PayloadFields[57]),
+        ParentSessionID = tolong(PayloadFields[58]), //??? tolong() is probably correct, larger sample size or spec would have been useful to verify
+        ParentStartTime = tostring(PayloadFields[59]), //??? Sample log does not include an example of this field's content in TRAFFIC type logs to verify the format and adjust accordingly. Documentation suggests format: Year/month/day hours:minutes:seconds
+        TunnelType = tostring(PayloadFields[60]),
+        AssocID = tolong(PayloadFields[61]),
+        Chunks = tolong(PayloadFields[62]),
+        ChunksSent = tolong(PayloadFields[63]),
+        ChunksReceived = tolong(PayloadFields[64]),
+        RuleUUID = tostring(PayloadFields[65]),
+        Http2Connection = tostring(PayloadFields[66]),
+        LinkChangeCount = toint(PayloadFields[67]),
+        PolicyID = tostring(PayloadFields[68]),
+        LinkSwitches = tostring(PayloadFields[69]),
+        SdwanCluster = tostring(PayloadFields[70]),
+        SdwanDeviceType = tostring(PayloadFields[71]),
+        SdwanClusterType = tostring(PayloadFields[72]),
+        SdwanSite = tostring(PayloadFields[73]),
+        DynamicUsergroupName = tostring(PayloadFields[74]),
+        X_Forwarded_For = tostring(PayloadFields[75]),
+        SourceDeviceCategory = tostring(PayloadFields[76]),
+        SourceDeviceProfile = tostring(PayloadFields[77]),
+        SourceDeviceModel = tostring(PayloadFields[78]),
+        SourceDeviceVendor = tostring(PayloadFields[79]),
+        SourceDeviceOSFamily = tostring(PayloadFields[80]),
+        SourceDeviceOSVersion = tostring(PayloadFields[81]),
+        SourceDeviceHostName = tostring(PayloadFields[82]),
+        SourceMACAddress = tostring(PayloadFields[83]),
+        DestinationDeviceCategory = tostring(PayloadFields[84]),
+        DestinationDeviceProfile = tostring(PayloadFields[85]),
+        DestinationDeviceModel = tostring(PayloadFields[86]),
+        DestinationDeviceVendor = tostring(PayloadFields[87]),
+        DestinationDeviceOSFamily = tostring(PayloadFields[88]),
+        DestinationDeviceOSVersion = tostring(PayloadFields[89]),
+        DestinationDeviceHostName = tostring(PayloadFields[90]),
+        DestinationMACAddress = tostring(PayloadFields[91]),
+        ContainerID = tostring(PayloadFields[92]),
+        PodNamespace = tostring(PayloadFields[93]),
+        PodName = tostring(PayloadFields[94]),
+        SourceEDL = tostring(PayloadFields[95]),
+        DestinationEDL = tostring(PayloadFields[96]),
+        HostID = tostring(PayloadFields[97]),
+        UserDeviceSerialNumber = tostring(PayloadFields[98]),
+        SourceDAG = tostring(PayloadFields[99]),
+        DestinationDAG = tostring(PayloadFields[100]),
+        SessionOwner = tostring(PayloadFields[101]),
+        HighResTimestamp = todatetime(tostring(PayloadFields[102])), // Sample: 2025-08-06T00:00:00.133+02:00 
+        NSSAI_SST = tostring(PayloadFields[103]),
+        NSSAI_SD = tostring(PayloadFields[104]),
+        AppSubcategory = tostring(PayloadFields[105]),
+        AppCategory = tostring(PayloadFields[106]),
+        AppTechnology = tostring(PayloadFields[107]),
+        AppRisk = toint(PayloadFields[108]),
+        AppCharacteristic = tostring(PayloadFields[109]),
+        AppContainer = tostring(PayloadFields[110]),
+        TunneledApp = tostring(PayloadFields[111]),
+        AppIsSaaS = tostring(PayloadFields[112]), //??? tostring() is probably correct, larger sample size or spec would have been useful to verify
+        AppSanctionedState = tostring(PayloadFields[113]), //??? tostring() is probably correct, larger sample size or spec would have been useful to verify
+        IsOffloaded = tostring(PayloadFields[114])
+    | project-away CsvFields, FieldCount, PayloadFields, HeaderAndFirstField // cleanup intermediate fields
+    | project-away FutureUse1, FutureUse2, FutureUse3, FutureUse4, FutureUse5 // optionally project-away if not needed
+    // "The FUTURE_USE tag applies to fields that are of no use to syslog ingestion."
+    // Source: https://docs.paloaltonetworks.com/pan-os/10-2/pan-os-admin/monitoring/use-syslog-for-monitoring/syslog-field-descriptions 
+};
+PanosTrafficParser
